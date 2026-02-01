@@ -5,8 +5,9 @@ import ConnectionStatus from './components/ConnectionStatus';
 import { Message, WebSocketMessage } from './types';
 
 // WebSocket server URL - configured for Render deployment
-const WS_URL = 'wss://oneminute-chat.onrender.com';
-const HTTP_URL = 'https://oneminute-chat.onrender.com';
+const WS_URL = 'wss://oneminute-backend-jvip.onrender.com';
+const HTTP_URL = 'https://oneminute-backend-jvip.onrender.com';
+
 
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
