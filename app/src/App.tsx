@@ -106,12 +106,16 @@ function App() {
 
             case 'new_message':
               if (data.message) {
+                const msg = {
+                  ...data.message,
+                  remainingTime: data.message.remainingTime ?? 10 * 60 * 1000  // ✅ CLIENT FALLBACK
+                };
                 setMessages(prev => {
                   // Deduplication: avoid duplicates on reconnect/replay
-                  if (prev.some(m => m.id === data.message!.id)) {
+                  if (prev.some(m => m.id === msg.id)) {
                     return prev;
                   }
-                  return [...prev, data.message!];
+                  return [...prev, msg];
                 });
               }
               break;
