@@ -1,47 +1,161 @@
 import { WebSocketServer } from 'ws';
 import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const adjectives = ['Blue', 'Silent', 'Quick', 'Hidden', 'Cold', 'Dark'];
+const animals = ['Fox', 'Wolf', 'Owl', 'Tiger', 'Raven', 'Shark'];
+
+function generateAnonName() {
+  return (
+    adjectives[Math.floor(Math.random() * adjectives.length)] +
+    animals[Math.floor(Math.random() * animals.length)] +
+    '#' +
+    Math.floor(100 + Math.random() * 900)
+  );
+}
 
 const PORT = process.env.PORT || 3000;
 const MESSAGE_TTL = 10 * 60 * 1000; // 10 minutes in milliseconds
-const RATE_LIMIT_WINDOW = 3000; // 3 seconds
+const RATE_LIMIT_WINDOW = 3000; // 3 seconds for messages
+const RATE_LIMIT_UPLOAD = 5000; // 5 seconds for uploads ✅ NEW
 const MAX_FILE_SIZE = 1 * 1024 * 1024; // 1 MB
 
 // In-memory storage
-const messages = new Map(); // messageId -> { id, text, timestamp, fileUrl?, fileName? }
 const files = new Map(); // fileId -> { data, mimeType, timestamp, fileName }
-const rateLimits = new Map(); // socketId -> lastMessageTime
+const rateLimits = new Map(); // socketId/IP -> lastMessageTime
 
-let messageIdCounter = 0;
 let fileIdCounter = 0;
 
-// Generate unique IDs
-function generateMessageId() {
-  return `msg_${Date.now()}_${++messageIdCounter}`;
+const rooms = new Map();
+
+// Global room with messages array
+rooms.set('global', {
+  id: 'global',
+  isPrivate: false,
+  members: new Set(),
+  messages: []
+});
+
+// Visit tracking storage
+const visits = {
+  daily: new Map(),
+  monthly: new Map()
+};
+
+// ✅ NEW: System message helper
+function systemMessage(roomId, text) {
+  const msg = {
+    id: `sys_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    text,
+    timestamp: Date.now(),
+    sender: 'System',
+    senderId: 'system',
+    isSystem: true
+  };
+
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  room.messages.push(msg);
+  broadcastToRoom(roomId, { type: 'new_message', message: msg });
 }
 
+function joinRoom(ws, roomId) {
+  leaveRoom(ws);
+  ws.user.currentRoom = roomId;
+
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  room.members.add(ws);
+
+  // Broadcast user count and list
+  broadcastUserCount(roomId);
+  broadcastUserList(roomId);
+
+  // Get username for this room
+  const username = roomId === 'global' 
+    ? ws.user.anonName 
+    : ws.user.roomNames.get(roomId) || 'Guest';
+
+  // ✅ NEW: Send system message for join
+  systemMessage(roomId, `${username} joined the room`);
+
+  ws.send(JSON.stringify({
+    type: 'init',
+    roomId,
+    messages: getActiveMessages(roomId),
+    username
+  }));
+}
+
+function leaveRoom(ws) {
+  const room = rooms.get(ws.user.currentRoom);
+  if (!room) return;
+
+  // ✅ NEW: Get username before leaving
+  const username = ws.user.currentRoom === 'global'
+    ? ws.user.anonName
+    : ws.user.roomNames.get(ws.user.currentRoom) || 'Guest';
+
+  room.members.delete(ws);
+  
+  // ✅ NEW: Send system message for leave
+  if (room.members.size > 0) { // Only if someone is left to see it
+    systemMessage(room.id, `${username} left the room`);
+  }
+
+  // Broadcast updated counts and list
+  broadcastUserCount(room.id);
+  broadcastUserList(room.id);
+}
+
+// Generate unique file ID
 function generateFileId() {
   return `file_${Date.now()}_${++fileIdCounter}`;
 }
 
+// Get active messages from a room
+function getActiveMessages(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return [];
+
+  const now = Date.now();
+  return room.messages
+    .filter(msg => now - msg.timestamp <= MESSAGE_TTL)
+    .map(msg => ({
+      ...msg,
+      remainingTime: MESSAGE_TTL - (now - msg.timestamp)
+    }));
+}
+
+// Check rate limit for a socket or IP
+function checkRateLimit(identifier, window = RATE_LIMIT_WINDOW) {
+  const now = Date.now();
+  const lastTime = rateLimits.get(identifier);
+  
+  if (lastTime && now - lastTime < window) {
+    return false;
+  }
+  
+  rateLimits.set(identifier, now);
+  return true;
+}
+
 // Clean up expired messages and files
-function cleanup() {
+setInterval(() => {
   const now = Date.now();
   let messagesDeleted = 0;
   let filesDeleted = 0;
 
-  // Clean up messages
-  for (const [id, msg] of messages.entries()) {
-    if (now - msg.timestamp > MESSAGE_TTL) {
-      messages.delete(id);
-      messagesDeleted++;
-    }
-  }
+  // Clean up messages in all rooms
+  rooms.forEach(room => {
+    const beforeCount = room.messages.length;
+    room.messages = room.messages.filter(
+      msg => now - msg.timestamp <= MESSAGE_TTL
+    );
+    messagesDeleted += beforeCount - room.messages.length;
+  });
 
   // Clean up files
   for (const [id, file] of files.entries()) {
@@ -54,41 +168,7 @@ function cleanup() {
   if (messagesDeleted > 0 || filesDeleted > 0) {
     console.log(`Cleanup: removed ${messagesDeleted} messages, ${filesDeleted} files`);
   }
-}
-
-// Run cleanup every 30 seconds
-setInterval(cleanup, 30000);
-
-// Get active messages (within TTL)
-function getActiveMessages() {
-  const now = Date.now();
-  const activeMessages = [];
-  
-  for (const msg of messages.values()) {
-    if (now - msg.timestamp <= MESSAGE_TTL) {
-      activeMessages.push({
-        ...msg,
-        remainingTime: MESSAGE_TTL - (now - msg.timestamp)
-      });
-    }
-  }
-  
-  // Sort by timestamp
-  return activeMessages.sort((a, b) => a.timestamp - b.timestamp);
-}
-
-// Check rate limit for a socket
-function checkRateLimit(socketId) {
-  const now = Date.now();
-  const lastTime = rateLimits.get(socketId);
-  
-  if (lastTime && now - lastTime < RATE_LIMIT_WINDOW) {
-    return false;
-  }
-  
-  rateLimits.set(socketId, now);
-  return true;
-}
+}, 30000);
 
 // Create HTTP server for file uploads and health checks
 const httpServer = http.createServer((req, res) => {
@@ -103,12 +183,52 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
+  // Stats endpoint
+  if (req.url === '/stats' && req.method === 'GET') {
+    let totalMessages = 0;
+    rooms.forEach(room => {
+      totalMessages += room.messages.length;
+    });
+
+    const dailyStats = {};
+    visits.daily.forEach((count, date) => {
+      dailyStats[date] = count;
+    });
+
+    const monthlyStats = {};
+    visits.monthly.forEach((count, month) => {
+      monthlyStats[month] = count;
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      visits: {
+        daily: dailyStats,
+        monthly: monthlyStats
+      },
+      current: {
+        messages: totalMessages,
+        rooms: rooms.size,
+        connections: wss.clients.size
+      },
+      uptime: Math.floor(process.uptime())
+    }));
+    return;
+  }
+
   // Health check endpoint
   if (req.url === '/health' && req.method === 'GET') {
+    let totalMessages = 0;
+    rooms.forEach(room => {
+      totalMessages += room.messages.length;
+    });
+
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ 
       status: 'ok', 
-      messages: messages.size,
+      messages: totalMessages,
+      rooms: rooms.size,
       uptime: process.uptime()
     }));
     return;
@@ -116,6 +236,14 @@ const httpServer = http.createServer((req, res) => {
 
   // File upload endpoint
   if (req.url === '/upload' && req.method === 'POST') {
+    // ✅ NEW: Rate limit uploads by IP
+    const clientIp = req.socket.remoteAddress;
+    if (!checkRateLimit(clientIp, RATE_LIMIT_UPLOAD)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Too many uploads. Please wait a few seconds.' }));
+      return;
+    }
+
     let body = Buffer.alloc(0);
     let contentLength = parseInt(req.headers['content-length'] || '0');
     
@@ -214,26 +342,92 @@ const httpServer = http.createServer((req, res) => {
 // Create WebSocket server
 const wss = new WebSocketServer({ server: httpServer });
 
-// Broadcast message to all connected clients
-function broadcast(data, excludeSocket = null) {
-  const message = JSON.stringify(data);
-  wss.clients.forEach((client) => {
-    if (client !== excludeSocket && client.readyState === 1) { // WebSocket.OPEN = 1
-      client.send(message);
+// Broadcast message to room
+function broadcastToRoom(roomId, data) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const payload = JSON.stringify(data);
+  room.members.forEach(client => {
+    if (client.readyState === 1) {
+      client.send(payload);
     }
+  });
+}
+
+// Broadcast user count to all members in a room
+function broadcastUserCount(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  broadcastToRoom(roomId, {
+    type: 'room_users',
+    roomId,
+    count: room.members.size
+  });
+}
+
+// Get list of users in a room
+function getRoomUsers(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return [];
+
+  return Array.from(room.members).map(ws => ({
+    id: ws.user.id,
+    name: roomId === 'global'
+      ? ws.user.anonName
+      : ws.user.roomNames.get(roomId)
+  }));
+}
+
+// Broadcast user list to all members in a room
+function broadcastUserList(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  broadcastToRoom(roomId, {
+    type: 'room_user_list',
+    users: getRoomUsers(roomId)
   });
 }
 
 // Handle WebSocket connections
 wss.on('connection', (ws, req) => {
-  const socketId = `${req.socket.remoteAddress}_${Date.now()}_${Math.random()}`;
-  console.log(`Client connected: ${socketId}`);
+  ws.user = {
+    id: crypto.randomUUID(),
+    anonName: generateAnonName(),
+    currentRoom: 'global',
+    roomNames: new Map()
+  };
 
-  // Send current active messages to new client
+  const socketId = ws.user.id;
+
+  // Track visit statistics
+  const now = new Date();
+  const dayKey = now.toISOString().slice(0, 10);
+  const monthKey = now.toISOString().slice(0, 7);
+
+  visits.daily.set(dayKey, (visits.daily.get(dayKey) || 0) + 1);
+  visits.monthly.set(monthKey, (visits.monthly.get(monthKey) || 0) + 1);
+
+  // ✅ IMPROVED: Clean up ghost sockets from all rooms
+  wss.clients.forEach(client => {
+    if (client !== ws && client.readyState !== 1) {
+      rooms.forEach(room => room.members.delete(client));
+    }
+  });
+
+  console.log(`Client connected: ${socketId} (Daily: ${visits.daily.get(dayKey)}, Monthly: ${visits.monthly.get(monthKey)})`);
+
+  // Send user identity on initial connection
   ws.send(JSON.stringify({
-    type: 'init',
-    messages: getActiveMessages()
+    type: 'identity',
+    userId: ws.user.id,
+    anonName: ws.user.anonName
   }));
+
+  // Join global room (joinRoom will send init with messages)
+  joinRoom(ws, 'global');
 
   // Handle messages from client
   ws.on('message', (data) => {
@@ -248,11 +442,10 @@ wss.on('connection', (ws, req) => {
 
       // Handle chat message
       if (parsed.type === 'message') {
-        // Rate limit check
-        if (!checkRateLimit(socketId)) {
+        if (!checkRateLimit(ws.user.id)) {
           ws.send(JSON.stringify({
             type: 'error',
-            message: 'Rate limit exceeded. Please wait 3 seconds between messages.'
+            message: 'Slow down.'
           }));
           return;
         }
@@ -269,28 +462,114 @@ wss.on('connection', (ws, req) => {
           return;
         }
 
-        const messageId = generateMessageId();
         const timestamp = Date.now();
 
         const message = {
-          id: messageId,
+          id: `msg_${timestamp}_${Math.random().toString(36).substr(2, 9)}`,
           text: text || '',
           timestamp,
           fileUrl,
-          fileName
+          fileName,
+          sender: ws.user.currentRoom === 'global'
+            ? ws.user.anonName
+            : ws.user.roomNames.get(ws.user.currentRoom) || 'Guest',
+          senderId: ws.user.id
         };
 
-        messages.set(messageId, message);
+        // Store message in room
+        const room = rooms.get(ws.user.currentRoom);
+        if (!room) return;
 
-        // Broadcast to all clients
-        broadcast({
+        room.messages.push(message);
+
+        // Broadcast to room
+        broadcastToRoom(ws.user.currentRoom, {
           type: 'new_message',
-          message: {
-            ...message,
-            remainingTime: MESSAGE_TTL
-          }
+          message
         });
       }
+
+      // Handle room creation
+      if (parsed.type === 'create_room') {
+        const roomId = crypto.randomUUID();
+        const roomKey = crypto.randomBytes(6).toString('hex');
+        
+        rooms.set(roomId, {
+          id: roomId,
+          key: roomKey,
+          isPrivate: true,
+          members: new Set(),
+          messages: []
+        });
+
+        const username = parsed.username?.trim() || 'Host';
+        
+        if (username.length === 0 || username.length > 20) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Username must be between 1 and 20 characters'
+          }));
+          return;
+        }
+
+        ws.user.roomNames.set(roomId, username);
+
+        joinRoom(ws, roomId);
+
+        ws.send(JSON.stringify({
+          type: 'room_created',
+          roomId,
+          roomKey,
+          username
+        }));
+      }
+
+      // Handle room join
+      if (parsed.type === 'join_room') {
+        const roomId = parsed.roomId;
+        const room = rooms.get(roomId);
+        
+        if (!room || (room.isPrivate && room.key !== parsed.roomKey)) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Invalid room or key'
+          }));
+          return;
+        }
+
+        const username = parsed.username?.trim() || 'Guest';
+        
+        if (username.length === 0 || username.length > 20) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: 'Username must be between 1 and 20 characters'
+          }));
+          return;
+        }
+
+        // Check for duplicate username
+        const isDuplicate = Array.from(room.members).some(
+          client => client.user.roomNames.get(roomId) === username
+        );
+        
+        if (isDuplicate) {
+          ws.send(JSON.stringify({
+            type: 'error',
+            message: `Username "${username}" is already taken in this room`
+          }));
+          return;
+        }
+
+        ws.user.roomNames.set(roomId, username);
+        
+        joinRoom(ws, roomId);
+      }
+
+      // Handle leave room (return to global)
+      if (parsed.type === 'leave_room') {
+        joinRoom(ws, 'global');
+      }
+
     } catch (error) {
       console.error('Error handling message:', error);
       ws.send(JSON.stringify({
@@ -303,7 +582,25 @@ wss.on('connection', (ws, req) => {
   // Handle client disconnect
   ws.on('close', () => {
     console.log(`Client disconnected: ${socketId}`);
+    
+    const currentRoom = rooms.get(ws.user.currentRoom);
+    
+    // ✅ IMPROVED: Clean up from ALL rooms and broadcast updates
+    rooms.forEach(room => {
+      if (room.members.has(ws)) {
+        room.members.delete(ws);
+        broadcastUserCount(room.id);
+        broadcastUserList(room.id);
+      }
+    });
+    
     rateLimits.delete(socketId);
+
+    // Auto-destroy empty private rooms
+    if (currentRoom && currentRoom.isPrivate && currentRoom.members.size === 0) {
+      rooms.delete(currentRoom.id);
+      console.log(`Deleted empty private room: ${currentRoom.id}`);
+    }
   });
 
   // Handle errors
@@ -317,4 +614,5 @@ httpServer.listen(PORT, () => {
   console.log(`OneMinute server running on port ${PORT}`);
   console.log(`WebSocket server ready`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Stats endpoint: http://localhost:${PORT}/stats`);
 });

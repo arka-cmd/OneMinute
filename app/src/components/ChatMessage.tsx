@@ -4,11 +4,32 @@ interface ChatMessageProps {
   message: Message;
   formatRemainingTime: (ms: number) => string;
   isNew?: boolean;
+  currentUserName?: string;
+  userId?: string;
 }
 
-function ChatMessage({ message, formatRemainingTime, isNew }: ChatMessageProps) {
+function ChatMessage({ message, formatRemainingTime, isNew, currentUserName, userId }: ChatMessageProps) {
+  // ✅ NEW: Render system messages with special styling
+  if (message.isSystem) {
+    return (
+      <div className={`text-center py-2 ${isNew ? 'animate-fadeIn' : ''}`}>
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10">
+          <svg className="w-3 h-3 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span className="text-xs text-white/50 italic">{message.text}</span>
+        </div>
+      </div>
+    );
+  }
+
   const hasAttachment = message.fileUrl && message.fileName;
   const remainingTime = message.remainingTime || 0;
+  
+  // Use senderId for reliable identification when available, fallback to username
+  const isMine = userId && message.senderId 
+    ? message.senderId === userId
+    : Boolean(currentUserName && message.sender === currentUserName);
 
   const getFileIcon = (fileName: string) => {
     const ext = fileName.split('.').pop()?.toLowerCase();
@@ -43,51 +64,68 @@ function ChatMessage({ message, formatRemainingTime, isNew }: ChatMessageProps) 
 
   return (
     <div
-      className={`animate-fadeIn ${isNew ? 'animate-slideIn' : ''}`}
+      className={`animate-fadeIn ${isNew ? 'animate-slideIn' : ''} ${
+        isMine ? 'flex justify-end' : 'flex justify-start'
+      }`}
     >
-      <div className="bg-white/10 backdrop-blur-sm rounded-lg p-3 hover:bg-white/15 transition-colors">
-        {/* Message text */}
-        {message.text && (
-          <p className="text-white/90 whitespace-pre-wrap break-words mb-2">
-            {message.text}
-          </p>
-        )}
+      <div className={`max-w-[80%] ${isMine ? 'items-end' : 'items-start'} flex flex-col`}>
+        {/* Sender name */}
+        <div className={`text-xs mb-1 px-1 ${
+          isMine ? 'text-cyan-300/80' : 'text-white/50'
+        }`}>
+          {isMine ? 'You' : message.sender}
+        </div>
 
-        {/* File attachment */}
-        {hasAttachment && (
-          <a
-            href={`https://oneminute-chat.onrender.com${message.fileUrl}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 bg-white/10 hover:bg-white/20 rounded-lg p-2 mb-2 transition-colors group"
-          >
-            <div className="text-cyan-400 group-hover:text-cyan-300">
-              {getFileIcon(message.fileName!)}
-            </div>
-            <span className="text-sm text-white/80 truncate flex-1">
-              {message.fileName}
-            </span>
-            <svg 
-              className="w-4 h-4 text-white/40 group-hover:text-white/60" 
-              fill="none" 
-              stroke="currentColor" 
-              viewBox="0 0 24 24"
+        {/* Message bubble */}
+        <div
+          className={`rounded-lg p-3 transition-colors ${
+            isMine
+              ? 'bg-gradient-to-br from-cyan-500/20 to-blue-500/20 backdrop-blur-sm border border-cyan-400/30 hover:border-cyan-400/50'
+              : 'bg-white/10 backdrop-blur-sm hover:bg-white/15'
+          }`}
+        >
+          {/* Message text */}
+          {message.text && (
+            <p className="text-white/90 whitespace-pre-wrap break-words mb-2">
+              {message.text}
+            </p>
+          )}
+
+          {/* File attachment */}
+          {hasAttachment && (
+            <a
+              href={message.fileUrl}
+              download={message.fileName}
+              className="flex items-center gap-2 bg-white/10 hover:bg-white/20 rounded-lg p-2 mb-2 transition-colors group"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-            </svg>
-          </a>
-        )}
+              <div className="text-cyan-400 group-hover:text-cyan-300">
+                {getFileIcon(message.fileName!)}
+              </div>
+              <span className="text-sm text-white/80 truncate flex-1">
+                {message.fileName}
+              </span>
+              <svg 
+                className="w-4 h-4 text-white/40 group-hover:text-white/60" 
+                fill="none" 
+                stroke="currentColor" 
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+            </a>
+          )}
 
-        {/* Footer with timestamp and countdown */}
-        <div className="flex items-center justify-between text-xs">
-          <span className="text-white/40">
-            {new Date(message.timestamp).toLocaleTimeString()}
-          </span>
-          <div className="flex items-center gap-1 text-orange-300/80">
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span className="font-mono">{formatRemainingTime(remainingTime)}</span>
+          {/* Footer with timestamp and countdown */}
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-white/40">
+              {new Date(message.timestamp).toLocaleTimeString()}
+            </span>
+            <div className="flex items-center gap-1 text-orange-300/80">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span className="font-mono">{formatRemainingTime(remainingTime)}</span>
+            </div>
           </div>
         </div>
       </div>

@@ -2,7 +2,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import ChatMessage from './components/ChatMessage';
 import MessageInput from './components/MessageInput';
 import ConnectionStatus from './components/ConnectionStatus';
+import RoomControls from './components/RoomControls';
 import { Message, WebSocketMessage } from './types';
+import StatsPanel from './components/StatsPanel';
+
 
 // WebSocket server URL - configured for Render deployment
 const WS_URL = 'wss://oneminute-backend-jvip.onrender.com';
@@ -14,9 +17,24 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [anonName, setAnonName] = useState<string | null>(null);
+  const [currentRoom, setCurrentRoom] = useState('global');
+  const [currentUsername, setCurrentUsername] = useState<string | null>(null);
+  const [userCount, setUserCount] = useState(0);
+  const [users, setUsers] = useState<Array<{ id: string; name: string }>>([]);
+  // ✅ NEW: Track if room ID was copied
+  const [roomIdCopied, setRoomIdCopied] = useState(false);
+  
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Scroll to bottom of messages
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
 
   // Format remaining time
   const formatRemainingTime = (ms: number): string => {
@@ -24,6 +42,25 @@ function App() {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Fix file URLs - prefix with backend URL if needed
+  const getFullFileUrl = (fileUrl: string | undefined): string | undefined => {
+    if (!fileUrl) return undefined;
+    if (fileUrl.startsWith('http')) return fileUrl;
+    return `${HTTP_URL}${fileUrl}`;
+  };
+
+  // ✅ NEW: Copy room ID to clipboard
+  const copyRoomId = async () => {
+    try {
+      await navigator.clipboard.writeText(currentRoom);
+      setRoomIdCopied(true);
+      setTimeout(() => setRoomIdCopied(false), 2000);
+    } catch (error) {
+      console.error('Failed to copy room ID:', error);
+      alert('Failed to copy room ID');
+    }
   };
 
   // Connect to WebSocket
@@ -58,15 +95,22 @@ function App() {
           const data: WebSocketMessage = JSON.parse(event.data);
 
           switch (data.type) {
+            case 'identity':
+              setUserId(data.userId);
+              setAnonName(data.anonName);
+              break;
+
             case 'init':
+              setCurrentRoom(data.roomId);
+              setCurrentUsername(data.username);
               setMessages(data.messages || []);
               break;
 
             case 'new_message':
               if (data.message) {
-                setMessages((prev) => {
-                  // Avoid duplicates
-                  if (prev.some((m) => m.id === data.message!.id)) {
+                setMessages(prev => {
+                  // Deduplication: avoid duplicates on reconnect/replay
+                  if (prev.some(m => m.id === data.message!.id)) {
                     return prev;
                   }
                   return [...prev, data.message!];
@@ -74,13 +118,37 @@ function App() {
               }
               break;
 
+            case 'room_created':
+              setCurrentRoom(data.roomId);
+              setCurrentUsername(data.username);
+              setMessages([]);
+              alert(`Room created!\nShare this key: ${data.roomKey}`);
+              break;
+
+            case 'room_joined':
+              setCurrentRoom(data.roomId);
+              setCurrentUsername(data.username);
+              setMessages(data.messages || []);
+              break;
+
             case 'error':
-              console.error('Server error:', data.message);
               alert(data.message || 'An error occurred');
               break;
 
             case 'pong':
               // Ping-pong successful
+              break;
+
+            case 'room_users':
+              if (data.roomId === currentRoom) {
+                setUserCount(data.count || 0);
+              }
+              break;
+
+            case 'room_user_list':
+              if (data.roomId === currentRoom) {
+                setUsers(data.users || []);
+              }
               break;
           }
         } catch (error) {
@@ -116,7 +184,7 @@ function App() {
       console.error('Error creating WebSocket:', error);
       setConnectionError('Failed to connect. Retrying...');
     }
-  }, []);
+  }, [currentRoom]);
 
   // Initial connection
   useEffect(() => {
@@ -151,6 +219,11 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
   // Send message
   const sendMessage = (text: string, fileInfo?: { fileUrl: string; fileName: string }) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -169,6 +242,53 @@ function App() {
     }
 
     wsRef.current.send(JSON.stringify(message));
+  };
+
+  // Leave current room and return to global
+  const leaveRoom = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      alert('Not connected to server. Please wait...');
+      return;
+    }
+
+    if (currentRoom === 'global') {
+      return; // Already in global
+    }
+
+    // Instant UI feedback (server will confirm with 'init')
+    setMessages([]);
+    setCurrentRoom('global');
+    setCurrentUsername(anonName);
+
+    wsRef.current.send(JSON.stringify({ type: 'leave_room' }));
+  };
+
+  // Create a new private room
+  const createRoom = (username: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      alert('Not connected to server. Please wait...');
+      return;
+    }
+
+    wsRef.current.send(JSON.stringify({
+      type: 'create_room',
+      username
+    }));
+  };
+
+  // Join an existing private room
+  const joinRoom = (roomId: string, roomKey: string, username: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      alert('Not connected to server. Please wait...');
+      return;
+    }
+
+    wsRef.current.send(JSON.stringify({
+      type: 'join_room',
+      roomId,
+      roomKey,
+      username
+    }));
   };
 
   // Upload file
@@ -247,11 +367,73 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">OneMinute</h1>
-              <p className="text-xs text-white/60">Anonymous Global Chat</p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-white/60">
+                  {currentRoom === 'global' ? 'Anonymous Global Chat' : 'Private Room'}
+                  {anonName && ` • ${anonName}`}
+                  {userCount > 0 && (
+                    <span className="ml-2">
+                      • {userCount} {userCount === 1 ? 'user' : 'users'} online
+                    </span>
+                  )}
+                </p>
+                {/* ✅ NEW: Room ID copy button */}
+                {currentRoom !== 'global' && (
+                  <button
+                    onClick={copyRoomId}
+                    className="text-xs text-cyan-300 hover:text-cyan-200 underline transition-colors flex items-center gap-1"
+                    title="Copy Room ID"
+                  >
+                    {roomIdCopied ? (
+                      <>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        Copied!
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        Copy Room ID
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          <ConnectionStatus isConnected={isConnected} error={connectionError} />
+          <div className="flex items-center gap-3">
+            {userCount > 0 && (
+              <button
+                onClick={() => {
+                  const userList = users
+                    .map(u => `${u.name}${u.id === userId ? ' (You)' : ''}`)
+                    .join('\n');
+                  alert(`Users online (${users.length}):\n\n${userList}`);
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors border border-white/20"
+                title="View online users"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+                <span>{userCount}</span>
+              </button>
+            )}
+            
+            {currentRoom !== 'global' && (
+              <button
+                onClick={leaveRoom}
+                className="px-3 py-1.5 text-sm bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors border border-white/20"
+              >
+                ← Back to Global
+              </button>
+            )}
+            <ConnectionStatus isConnected={isConnected} error={connectionError} />
+          </div>
         </div>
       </header>
 
@@ -264,6 +446,14 @@ function App() {
           <span className="font-medium">Messages disappear after 10 minutes</span>
         </div>
       </div>
+
+      {/* Room Controls */}
+      <RoomControls
+        isConnected={isConnected}
+        currentRoom={currentRoom}
+        onCreateRoom={createRoom}
+        onJoinRoom={joinRoom}
+      />
 
       {/* Chat Area */}
       <main className="flex-1 overflow-hidden flex flex-col max-w-4xl mx-auto w-full">
@@ -281,12 +471,18 @@ function App() {
             messages.map((message, index) => (
               <ChatMessage
                 key={message.id}
-                message={message}
+                message={{
+                  ...message,
+                  fileUrl: getFullFileUrl(message.fileUrl)
+                }}
                 formatRemainingTime={formatRemainingTime}
                 isNew={index === messages.length - 1}
+                currentUserName={currentUsername ?? undefined}
+                userId={userId ?? undefined}
               />
             ))
           )}
+          <div ref={messagesEndRef} />
         </div>
 
         {/* Input Area */}
