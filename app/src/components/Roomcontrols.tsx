@@ -48,6 +48,11 @@ function RoomControls({ isConnected, currentRoom, onCreateRoom, onJoinRoom }: Ro
   return (
     <div className="border-t border-white/10 bg-black/10 p-3">
       <div className="max-w-4xl mx-auto">
+        {/* ✅ NEW: Private Rooms heading */}
+        <div className="text-center text-sm text-white/60 mb-2">
+          Private Rooms
+        </div>
+
         {/* Action Buttons */}
         {!showCreateRoom && !showJoinRoom && (
           <div className="flex gap-2 justify-center">

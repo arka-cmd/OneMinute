@@ -6,11 +6,9 @@ import RoomControls from './components/RoomControls';
 import { Message, WebSocketMessage } from './types';
 import StatsPanel from './components/StatsPanel';
 
-
 // WebSocket server URL - configured for Render deployment
 const WS_URL = 'wss://oneminute-backend-jvip.onrender.com';
 const HTTP_URL = 'https://oneminute-backend-jvip.onrender.com';
-
 
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -208,11 +206,16 @@ function App() {
     const interval = setInterval(() => {
       setMessages((prev) =>
         prev
-          .map((msg) => ({
-            ...msg,
-            remainingTime: msg.remainingTime ? msg.remainingTime - 1000 : 0,
-          }))
-          .filter((msg) => msg.remainingTime && msg.remainingTime > 0)
+          .map((msg) => {
+            if (typeof msg.remainingTime !== 'number') return msg;
+            return {
+              ...msg,
+              remainingTime: msg.remainingTime - 1000,
+            };
+          })
+          .filter((msg) =>
+            typeof msg.remainingTime !== 'number' || msg.remainingTime > 0
+          )
       );
     }, 1000);
 
@@ -447,13 +450,17 @@ function App() {
         </div>
       </div>
 
-      {/* Room Controls */}
-      <RoomControls
-        isConnected={isConnected}
-        currentRoom={currentRoom}
-        onCreateRoom={createRoom}
-        onJoinRoom={joinRoom}
-      />
+      {/* ✅ FIXED: Room Controls - Now visible & obvious ABOVE chat area */}
+      {currentRoom === 'global' && (
+        <div className="border-b border-white/10 bg-black/20">
+          <RoomControls
+            isConnected={isConnected}
+            currentRoom={currentRoom}
+            onCreateRoom={createRoom}
+            onJoinRoom={joinRoom}
+          />
+        </div>
+      )}
 
       {/* Chat Area */}
       <main className="flex-1 overflow-hidden flex flex-col max-w-4xl mx-auto w-full">
